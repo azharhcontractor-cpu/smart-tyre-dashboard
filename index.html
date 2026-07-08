@@ -343,6 +343,10 @@ tbody tr.clickable:hover{background:var(--amber-soft);}
       </div>
     </div>
     <div class="top-controls">
+      <div class="view-toggle" id="valueToggle">
+        <button data-vmode="avg" class="active">Avg / Month</button>
+        <button data-vmode="cumulative">Cumulative</button>
+      </div>
       <div class="view-toggle" id="viewToggle">
         <button data-mode="overall" class="active">Overall Smart Tyre</button>
         <button data-mode="embedded">Embedded Only</button>
@@ -483,14 +487,33 @@ function partialNote(period){
   const got = periodIndices(period).length, exp = periodExpectedMonths(period);
   return `⚠ ${periodLabel(period)} currently has only ${got} of ${exp} months of data (data runs through ${monthMeta[monthMeta.length-1].label}). Any comparison against a full period will understate growth — treat it as a run‑rate, not a like‑for‑like.`;
 }
+function sameMonthsLastYearIndices(idxArr){
+  const out = [];
+  idxArr.forEach(i=>{
+    const m = monthMeta[i];
+    const cand = monthMeta.find(x=>x.mm===m.mm && x.yy===m.yy-1);
+    if(cand) out.push(cand.idx);
+  });
+  return out;
+}
+function monthRangeLabel(idxArr){
+  if(!idxArr.length) return '—';
+  const first = monthMeta[idxArr[0]], last = monthMeta[idxArr[idxArr.length-1]];
+  const mn = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  if(first.yy===last.yy) return mn[first.mm]+'–'+mn[last.mm]+' '+first.yy;
+  return mn[first.mm]+" '"+String(first.yy).slice(2)+'–'+mn[last.mm]+" '"+String(last.yy).slice(2);
+}
 
 /* ---------- current global state ---------- */
 const state = {
   mode: 'overall', // overall | embedded
+  valueMode: 'avg', // avg | cumulative
 };
 
 function dealerSeries(d){ return state.mode==='overall' ? d.m : d.e; }
 function sumForIdx(d, idxs){ const s = dealerSeries(d); let t=0; for(let k=0;k<idxs.length;k++){ t += (s[idxs[k]]||0); } return t; }
+function periodValue(total, idxsLen){ return state.valueMode==='avg' ? total/(idxsLen||1) : total; }
+function valueColLabel(base){ return state.valueMode==='avg' ? base+' (avg/mo)' : base+' (total)'; }
 
 /* ---------- hierarchy maps (built once, independent of mode) ---------- */
 const ZONES = uniqPreserve(DEALERS.map(d=>d.zone)).sort();
@@ -565,53 +588,67 @@ function renderOverview(){
 
 function drawOverview(){
   const curFY = {type:'fy', value: FY_LIST[FY_LIST.length-1]};
-  const prevFY = previousPeriod(curFY);
   const curIdx = periodIndices(curFY);
-  const prevIdx = prevFY ? periodIndices(prevFY) : [];
+  const ytdPrevIdx = sameMonthsLastYearIndices(curIdx);
+  const curRangeLbl = monthRangeLabel(curIdx);
+  const prevRangeLbl = monthRangeLabel(ytdPrevIdx);
+  const curMonths = curIdx.length || 1;
+  const prevMonths = ytdPrevIdx.length || 1;
 
   let curTotal=0, prevTotal=0;
   const zoneCur={}, zonePrev={};
   ZONES.forEach(z=>{zoneCur[z]=0; zonePrev[z]=0;});
+  const regionCur={}, regionPrev={};
 
   DEALERS.forEach(d=>{
-    const c = sumForIdx(d,curIdx), p = sumForIdx(d,prevIdx);
+    const c = sumForIdx(d,curIdx), p = sumForIdx(d,ytdPrevIdx);
     curTotal+=c; prevTotal+=p;
     zoneCur[d.zone]+=c; zonePrev[d.zone]+=p;
+    const rk = d.zone+'|'+d.region;
+    regionCur[rk] = (regionCur[rk]||0)+c;
+    regionPrev[rk] = (regionPrev[rk]||0)+p;
   });
 
-  const pNote = partialNote(curFY);
-  const noteEl = document.getElementById('ov-note');
-  if(noteEl) noteEl.innerHTML = pNote ? `<div class="note">${pNote}</div>` : '';
+  const curVal = periodValue(curTotal, curMonths), prevVal = periodValue(prevTotal, prevMonths);
+  const headlineLabel = state.valueMode==='avg' ? 'YTD avg / month' : 'YTD total';
 
-  const g = growthDisplay(curTotal, prevTotal);
+  const noteEl = document.getElementById('ov-note');
+  if(noteEl) noteEl.innerHTML = ytdPrevIdx.length < curIdx.length
+    ? `<div class="note">⚠ Comparing ${curRangeLbl} against ${prevRangeLbl} — one or more months don't have a matching prior‑year month in the data, so totals may not be fully like‑for‑like.</div>`
+    : '';
+
+  const g = growthDisplay(curVal, prevVal);
   let topZone = ZONES.reduce((a,b)=> zoneCur[b]>zoneCur[a]?b:a, ZONES[0]);
   let topGrowZone = ZONES.reduce((a,b)=>{
     const ga = growthPct(zoneCur[a],zonePrev[a]); const gb = growthPct(zoneCur[b],zonePrev[b]);
     const va = (ga===Infinity?999:ga)||-999, vb=(gb===Infinity?999:gb)||-999;
     return vb>va? b:a;
   }, ZONES[0]);
+  const regionKeys = Object.keys(regionCur);
+  const topRegionKey = regionKeys.reduce((a,b)=> regionCur[b]>regionCur[a]?b:a, regionKeys[0]);
+  const [topRegionZone, topRegionName] = topRegionKey.split('|');
 
   const modeLabel = state.mode==='overall' ? 'Overall Smart Tyre' : 'Embedded Only';
   document.getElementById('ov-kpis').innerHTML = `
     <div class="kpi-card">
-      <div class="kpi-label">${curFY.value} volume (${modeLabel})</div>
-      <div class="kpi-value">${n(curTotal)}</div>
-      <div class="kpi-delta ${g.cls}">${g.text} vs ${prevFY?prevFY.value:'n/a'}</div>
-    </div>
-    <div class="kpi-card teal">
-      <div class="kpi-label">All‑time volume (Jul'20 – Jul'26)</div>
-      <div class="kpi-value">${n(DEALERS.reduce((s,d)=>s+sumForIdx(d,monthMeta.map(m=>m.idx)),0))}</div>
-      <div class="kpi-delta flat">${DEALERS.length.toLocaleString('en-IN')} dealers tracked</div>
+      <div class="kpi-label">${headlineLabel}, ${curRangeLbl} (${modeLabel})</div>
+      <div class="kpi-value">${n(curVal)}</div>
+      <div class="kpi-delta ${g.cls}">${g.text} vs ${prevRangeLbl}</div>
     </div>
     <div class="kpi-card green">
-      <div class="kpi-label">Leading zone, ${curFY.value}</div>
+      <div class="kpi-label">Leading zone, YTD ${curRangeLbl}</div>
       <div class="kpi-value" style="font-size:19px;">${topZone}</div>
-      <div class="kpi-delta flat">${n(zoneCur[topZone])} units</div>
+      <div class="kpi-delta flat">${n(periodValue(zoneCur[topZone],curMonths))} ${state.valueMode==='avg'?'/mo':'units'}</div>
+    </div>
+    <div class="kpi-card teal">
+      <div class="kpi-label">Leading region, YTD ${curRangeLbl}</div>
+      <div class="kpi-value" style="font-size:19px;">${topRegionName}</div>
+      <div class="kpi-delta flat">${topRegionZone} · ${n(periodValue(regionCur[topRegionKey],curMonths))} ${state.valueMode==='avg'?'/mo':'units'}</div>
     </div>
     <div class="kpi-card">
-      <div class="kpi-label">Fastest growing zone, ${curFY.value}</div>
+      <div class="kpi-label">Fastest growing zone, YTD</div>
       <div class="kpi-value" style="font-size:19px;">${topGrowZone}</div>
-      <div class="kpi-delta ${pctClass(growthPct(zoneCur[topGrowZone],zonePrev[topGrowZone]))}">${growthDisplay(zoneCur[topGrowZone],zonePrev[topGrowZone]).text} YoY</div>
+      <div class="kpi-delta ${pctClass(growthPct(zoneCur[topGrowZone],zonePrev[topGrowZone]))}">${growthDisplay(zoneCur[topGrowZone],zonePrev[topGrowZone]).text} vs LY</div>
     </div>
   `;
 
@@ -643,38 +680,42 @@ function drawOverview(){
   });
 
   const tbl = document.getElementById('ov-zonetable');
-  const rows = ZONES.map(z=>({z, cur:zoneCur[z], prev:zonePrev[z]})).sort((a,b)=>b.cur-a.cur);
-  tbl.innerHTML = `<thead><tr><th class="left">Zone</th><th>${curFY.value}</th><th>${prevFY?prevFY.value:'Prev FY'}</th><th>Growth</th><th>Share of total</th></tr></thead>
+  const colLbl = state.valueMode==='avg' ? 'Avg/mo' : 'Total';
+  const rows = ZONES.map(z=>({z, curV: periodValue(zoneCur[z],curMonths), prevV: periodValue(zonePrev[z],prevMonths), cur:zoneCur[z]})).sort((a,b)=>b.cur-a.cur);
+  tbl.innerHTML = `<thead><tr><th class="left">Zone</th><th>${colLbl} ${curRangeLbl}</th><th>${colLbl} ${prevRangeLbl}</th><th>Growth</th><th>Share of total</th></tr></thead>
   <tbody>${rows.map(r=>{
-    const gd = growthDisplay(r.cur, r.prev);
+    const gd = growthDisplay(r.curV, r.prevV);
     const share = curTotal>0 ? (r.cur/curTotal*100).toFixed(1)+'%' : '—';
-    return `<tr><td class="left">${r.z}</td><td>${n(r.cur)}</td><td>${n(r.prev)}</td><td class="${gd.cls}">${gd.text}</td><td>${share}</td></tr>`;
+    return `<tr><td class="left">${r.z}</td><td>${n(r.curV)}</td><td>${n(r.prevV)}</td><td class="${gd.cls}">${gd.text}</td><td>${share}</td></tr>`;
   }).join('')}
-  <tr style="font-weight:700;"><td class="left">All India</td><td>${n(curTotal)}</td><td>${n(prevTotal)}</td><td class="${g.cls}">${g.text}</td><td>100.0%</td></tr>
+  <tr style="font-weight:700;"><td class="left">All India</td><td>${n(curVal)}</td><td>${n(prevVal)}</td><td class="${g.cls}">${g.text}</td><td>100.0%</td></tr>
   </tbody>`;
 }
 
 /* ============================================================
-   ALL-INDIA PERFORMANCE TAB (drilldown: All India > Zone > Region > Territory)
+   ALL-INDIA PERFORMANCE TAB (cascading filters: Zone -> Region -> Territory)
    ============================================================ */
-const perfState = { period:{type:'fy', value:FY_LIST[FY_LIST.length-1]}, path: [], sortKey:'vol', sortDir:'desc' };
+const perfState = { period:{type:'fy', value:FY_LIST[FY_LIST.length-1]}, zone:'', region:'', territory:'', sortKey:'vol', sortDir:'desc' };
 
 function renderPerformance(){
   const el = document.getElementById('view-performance');
   el.innerHTML = `
     <div class="panel">
       <div class="panel-head">
-        <div><p class="panel-title">All‑India Sales Performance</p><p class="panel-sub">Drill down: All India → Zone → Region → Territory → Dealers</p></div>
+        <div><p class="panel-title">All‑India Sales Performance</p><p class="panel-sub">All India → Zone → Region → Territory → Dealers</p></div>
       </div>
       <div class="controls-row">
         <div class="ctrl"><label>Period type</label><select id="perf-type">${periodTypeOptions()}</select></div>
         <div class="ctrl"><label>Period</label><select id="perf-value"></select></div>
+        <div class="ctrl"><label>Zone</label><select id="perf-zone"><option value="">All zones</option>${ZONES.map(z=>`<option value="${z}">${z}</option>`).join('')}</select></div>
+        <div class="ctrl"><label>Region</label><select id="perf-region"><option value="">All regions</option></select></div>
+        <div class="ctrl"><label>Territory</label><select id="perf-territory"><option value="">All territories</option></select></div>
         <div class="ctrl"><label>&nbsp;</label><button class="btn secondary" id="perf-reset">Reset to All India</button></div>
       </div>
       <div class="crumbs" id="perf-crumbs"></div>
       <div id="perf-note"></div>
       <div class="table-scroll"><table id="perf-table"></table></div>
-      <p class="note">Click any row to drill into it. Click a territory row to view its dealers in the Dealer Details tab. Click column headers to sort.</p>
+      <p class="note">Pick a Zone to see its Regions, then a Region to see its Territories. Click a territory row to view its dealers in Dealer Details. Click column headers to sort.</p>
     </div>
   `;
   document.getElementById('perf-type').addEventListener('change', e=>{
@@ -684,8 +725,37 @@ function renderPerformance(){
   fillPeriodValue('perf-value', perfState.period.type, ()=>{ perfState.period.value = document.getElementById('perf-value').value; drawPerformance(); });
   document.getElementById('perf-value').value = perfState.period.value;
   document.getElementById('perf-value').addEventListener('change', e=>{ perfState.period.value = e.target.value; drawPerformance(); });
-  document.getElementById('perf-reset').addEventListener('click', ()=>{ perfState.path=[]; drawPerformance(); });
+
+  document.getElementById('perf-zone').addEventListener('change', e=>{ perfState.zone=e.target.value; perfState.region=''; perfState.territory=''; populatePerfRegion(); populatePerfTerritory(); drawPerformance(); });
+  document.getElementById('perf-region').addEventListener('change', e=>{ perfState.region=e.target.value; perfState.territory=''; populatePerfTerritory(); drawPerformance(); });
+  document.getElementById('perf-territory').addEventListener('change', e=>{ perfState.territory=e.target.value; drawPerformance(); });
+  document.getElementById('perf-reset').addEventListener('click', ()=>{ perfState.zone=''; perfState.region=''; perfState.territory=''; syncPerfControls(); drawPerformance(); });
+
+  populatePerfRegion(); populatePerfTerritory();
   drawPerformance();
+}
+
+function syncPerfControls(){
+  const zEl = document.getElementById('perf-zone'); if(zEl) zEl.value = perfState.zone;
+  populatePerfRegion();
+  const rEl = document.getElementById('perf-region'); if(rEl) rEl.value = perfState.region;
+  populatePerfTerritory();
+  const tEl = document.getElementById('perf-territory'); if(tEl) tEl.value = perfState.territory;
+}
+function populatePerfRegion(){
+  const sel = document.getElementById('perf-region'); if(!sel) return;
+  const regions = perfState.zone ? [...(zoneRegions[perfState.zone]||[])].sort() : uniqPreserve(DEALERS.map(d=>d.region)).sort();
+  sel.innerHTML = '<option value="">All regions</option>' + regions.map(r=>`<option value="${r}">${r}</option>`).join('');
+  sel.value = perfState.region;
+}
+function populatePerfTerritory(){
+  const sel = document.getElementById('perf-territory'); if(!sel) return;
+  let terrs;
+  if(perfState.zone && perfState.region) terrs = [...(regionTerritories[perfState.zone+'|'+perfState.region]||[])].map(s=>s.split('||')[0]).sort();
+  else if(perfState.region) terrs = uniqPreserve(DEALERS.filter(d=>d.region===perfState.region).map(d=>d.territory)).sort();
+  else terrs = uniqPreserve(DEALERS.map(d=>d.territory)).sort();
+  sel.innerHTML = '<option value="">All territories</option>' + terrs.map(t=>`<option value="${t}">${t}</option>`).join('');
+  sel.value = perfState.territory;
 }
 
 function fillPeriodValue(selId, type, onReady){
@@ -696,20 +766,17 @@ function fillPeriodValue(selId, type, onReady){
 }
 
 function perfLevelInfo(){
-  // returns {level, filterFn} based on path
-  if(perfState.path.length===0) return {level:'zone', label:'All India'};
-  if(perfState.path.length===1) return {level:'region', label:perfState.path[0].value};
-  if(perfState.path.length===2) return {level:'territory', label:perfState.path[1].value};
-  return {level:'dealer', label:perfState.path[2].value};
+  if(perfState.territory) return {level:'dealer', label:perfState.territory};
+  if(perfState.region) return {level:'territory', label:perfState.region};
+  if(perfState.zone) return {level:'region', label:perfState.zone};
+  return {level:'zone', label:'All India'};
 }
 
-function dealersForPath(path){
+function dealersForFilters(zone, region, territory){
   return DEALERS.filter(d=>{
-    for(const p of path){
-      if(p.level==='zone' && d.zone!==p.value) return false;
-      if(p.level==='region' && d.region!==p.value) return false;
-      if(p.level==='territory' && d.territory!==p.value) return false;
-    }
+    if(zone && d.zone!==zone) return false;
+    if(region && d.region!==region) return false;
+    if(territory && d.territory!==territory) return false;
     return true;
   });
 }
@@ -717,17 +784,24 @@ function dealersForPath(path){
 function drawPerformance(){
   const idxs = periodIndices(perfState.period);
   const info = perfLevelInfo();
-  const scoped = dealersForPath(perfState.path);
+  const scoped = dealersForFilters(perfState.zone, perfState.region, perfState.territory);
   const pn = partialNote(perfState.period);
   const perfNoteEl = document.getElementById('perf-note');
   if(perfNoteEl) perfNoteEl.innerHTML = pn ? `<div class="note">${pn}</div>` : '';
 
   // breadcrumbs
-  const crumbs = ['<button data-i="-1">All India</button>'];
-  perfState.path.forEach((p,i)=>{ crumbs.push('<span class="sep">›</span>'); crumbs.push(`<button data-i="${i}">${p.value}</button>`); });
+  const crumbs = ['<button data-lvl="root">All India</button>'];
+  if(perfState.zone){ crumbs.push('<span class="sep">›</span>'); crumbs.push(`<button data-lvl="zone">${perfState.zone}</button>`); }
+  if(perfState.region){ crumbs.push('<span class="sep">›</span>'); crumbs.push(`<button data-lvl="region">${perfState.region}</button>`); }
   document.getElementById('perf-crumbs').innerHTML = crumbs.join(' ');
   document.getElementById('perf-crumbs').querySelectorAll('button').forEach(b=>{
-    b.addEventListener('click', ()=>{ const i=parseInt(b.dataset.i,10); perfState.path = i<0? [] : perfState.path.slice(0,i+1); drawPerformance(); });
+    b.addEventListener('click', ()=>{
+      const lvl = b.dataset.lvl;
+      if(lvl==='root'){ perfState.zone=''; perfState.region=''; perfState.territory=''; }
+      else if(lvl==='zone'){ perfState.region=''; perfState.territory=''; }
+      else if(lvl==='region'){ perfState.territory=''; }
+      syncPerfControls(); drawPerformance();
+    });
   });
 
   let rows = [];
@@ -738,14 +812,14 @@ function drawPerformance(){
       return {key:z, level:'zone', name:z, dealers:ds.length, vol};
     });
   } else if(info.level==='region'){
-    const regions = [...(zoneRegions[perfState.path[0].value]||[])];
+    const regions = [...(zoneRegions[perfState.zone]||[])];
     rows = regions.map(r=>{
       const ds = scoped.filter(d=>d.region===r);
       const vol = ds.reduce((s,d)=>s+sumForIdx(d,idxs),0);
       return {key:r, level:'region', name:r, dealers:ds.length, vol};
     });
   } else if(info.level==='territory'){
-    const rk = perfState.path[0].value+'|'+perfState.path[1].value;
+    const rk = perfState.zone+'|'+perfState.region;
     const terrs = [...(regionTerritories[rk]||[])].map(s=>{ const [name,code]=s.split('||'); return {name,code}; });
     rows = terrs.map(t=>{
       const ds = scoped.filter(d=>d.territory===t.name);
@@ -753,7 +827,6 @@ function drawPerformance(){
       return {key:t.name, level:'territory', name:t.name+' ('+t.code+')', rawName:t.name, dealers:ds.length, vol};
     });
   } else {
-    // dealer level fallback (shouldn't normally reach; territory click jumps to Dealer tab instead)
     rows = scoped.map(d=>({key:d.id, level:'dealer', name:d.name, dealers:1, vol:sumForIdx(d,idxs)}));
   }
 
@@ -763,20 +836,20 @@ function drawPerformance(){
   rows.sort((a,b)=> perfState.sortDir==='desc' ? (b[perfState.sortKey]-a[perfState.sortKey]) : (a[perfState.sortKey]-b[perfState.sortKey]));
 
   const cols = [
-    {key:'name', label: info.level==='zone'?'Zone':info.level==='region'?'Region':'Territory', left:true, sortable:false},
-    {key:'vol', label:'Volume'},
+    {key:'name', label: info.level==='zone'?'Zone':info.level==='region'?'Region':info.level==='territory'?'Territory':'Dealer', left:true, sortable:false},
+    {key:'vol', label: state.valueMode==='avg' ? 'Avg/Month' : 'Volume'},
     {key:'share', label:'Share %'},
   ];
 
   const table = document.getElementById('perf-table');
   table.innerHTML = `<thead><tr>${cols.map(c=>`<th class="${c.left?'left':''} ${perfState.sortKey===c.key?'sorted':''}" data-key="${c.key}">${c.label}${c.sortable===false?'':'<span class="arrow">'+(perfState.sortKey===c.key?(perfState.sortDir==='desc'?'▼':'▲'):'↕')+'</span>'}</th>`).join('')}</tr></thead>
   <tbody>${rows.map(r=>`
-    <tr class="clickable" data-key="${escAttr(r.key)}" data-level="${r.level}">
+    <tr class="${info.level!=='dealer'?'clickable':''}" data-key="${escAttr(r.key)}" data-level="${r.level}">
       <td class="left">${r.name}</td>
-      <td>${n(r.vol)}</td>
+      <td>${n(periodValue(r.vol, idxs.length))}</td>
       <td>${r.share.toFixed(1)}%</td>
     </tr>`).join('')}
-    <tr style="font-weight:700; background:#F7F7F5;"><td class="left">${info.level==='zone'?'All India':'Subtotal'}</td><td>${n(totalVol)}</td><td>100.0%</td></tr>
+    <tr style="font-weight:700; background:#F7F7F5;"><td class="left">${info.level==='zone'?'All India':'Subtotal'}</td><td>${n(periodValue(totalVol, idxs.length))}</td><td>100.0%</td></tr>
   </tbody>`;
 
   table.querySelectorAll('thead th[data-key]').forEach(th=>{
@@ -790,12 +863,13 @@ function drawPerformance(){
     tr.addEventListener('click', ()=>{
       const level = tr.dataset.level, key = tr.dataset.key;
       if(level==='territory'){
-        // jump to dealer details, filtered
         const row = rows.find(r=>String(r.key)===key);
-        goToDealerDetails({zone:perfState.path[0].value, region:perfState.path[1].value, territory:row.rawName});
+        goToDealerDetails({zone:perfState.zone, region:perfState.region, territory:row.rawName});
         return;
       }
-      perfState.path.push({level, value: key});
+      if(level==='zone'){ perfState.zone = key; perfState.region=''; perfState.territory=''; }
+      else if(level==='region'){ perfState.region = key; perfState.territory=''; }
+      syncPerfControls();
       drawPerformance();
     });
   });
@@ -810,7 +884,7 @@ const growthState = {
   period:{type:'fy', value:FY_LIST[FY_LIST.length-1]},
   compareMode:'previous', // previous | yoy | custom
   customPeriod:{type:'fy', value: FY_LIST[Math.max(0,FY_LIST.length-2)]},
-  path: [],
+  zone:'', region:'', territory:'',
   sortKey:'growth', sortDir:'desc'
 };
 
@@ -833,11 +907,16 @@ function renderGrowth(){
         </div>
         <div class="ctrl" id="gr-custom-wrap" style="display:none;"><label>Custom period type</label><select id="gr-ctype">${periodTypeOptions()}</select></div>
         <div class="ctrl" id="gr-custom-wrap2" style="display:none;"><label>Custom period</label><select id="gr-cvalue"></select></div>
+      </div>
+      <div class="controls-row">
+        <div class="ctrl"><label>Zone</label><select id="gr-zone"><option value="">All zones</option>${ZONES.map(z=>`<option value="${z}">${z}</option>`).join('')}</select></div>
+        <div class="ctrl"><label>Region</label><select id="gr-region"><option value="">All regions</option></select></div>
+        <div class="ctrl"><label>Territory</label><select id="gr-territory"><option value="">All territories</option></select></div>
         <div class="ctrl"><label>&nbsp;</label><button class="btn secondary" id="gr-reset">Reset to All India</button></div>
       </div>
       <div class="crumbs" id="gr-crumbs"></div>
-      <div class="table-scroll"><table id="gr-table"></table></div>
       <p class="note" id="gr-note"></p>
+      <div class="table-scroll"><table id="gr-table"></table></div>
     </div>
   `;
   const typeSel = document.getElementById('gr-type');
@@ -857,8 +936,36 @@ function renderGrowth(){
   ctypeSel.addEventListener('change', e=>{ growthState.customPeriod={type:e.target.value,value:null}; fillPeriodValue('gr-cvalue', e.target.value, ()=>{ growthState.customPeriod.value = document.getElementById('gr-cvalue').value; drawGrowth(); }); });
   document.getElementById('gr-cvalue').addEventListener('change', e=>{ growthState.customPeriod.value = e.target.value; drawGrowth(); });
 
-  document.getElementById('gr-reset').addEventListener('click', ()=>{ growthState.path=[]; drawGrowth(); });
+  document.getElementById('gr-zone').addEventListener('change', e=>{ growthState.zone=e.target.value; growthState.region=''; growthState.territory=''; populateGrRegion(); populateGrTerritory(); drawGrowth(); });
+  document.getElementById('gr-region').addEventListener('change', e=>{ growthState.region=e.target.value; growthState.territory=''; populateGrTerritory(); drawGrowth(); });
+  document.getElementById('gr-territory').addEventListener('change', e=>{ growthState.territory=e.target.value; drawGrowth(); });
+  document.getElementById('gr-reset').addEventListener('click', ()=>{ growthState.zone=''; growthState.region=''; growthState.territory=''; syncGrControls(); drawGrowth(); });
+
+  populateGrRegion(); populateGrTerritory();
   drawGrowth();
+}
+
+function syncGrControls(){
+  const zEl = document.getElementById('gr-zone'); if(zEl) zEl.value = growthState.zone;
+  populateGrRegion();
+  const rEl = document.getElementById('gr-region'); if(rEl) rEl.value = growthState.region;
+  populateGrTerritory();
+  const tEl = document.getElementById('gr-territory'); if(tEl) tEl.value = growthState.territory;
+}
+function populateGrRegion(){
+  const sel = document.getElementById('gr-region'); if(!sel) return;
+  const regions = growthState.zone ? [...(zoneRegions[growthState.zone]||[])].sort() : uniqPreserve(DEALERS.map(d=>d.region)).sort();
+  sel.innerHTML = '<option value="">All regions</option>' + regions.map(r=>`<option value="${r}">${r}</option>`).join('');
+  sel.value = growthState.region;
+}
+function populateGrTerritory(){
+  const sel = document.getElementById('gr-territory'); if(!sel) return;
+  let terrs;
+  if(growthState.zone && growthState.region) terrs = [...(regionTerritories[growthState.zone+'|'+growthState.region]||[])].map(s=>s.split('||')[0]).sort();
+  else if(growthState.region) terrs = uniqPreserve(DEALERS.filter(d=>d.region===growthState.region).map(d=>d.territory)).sort();
+  else terrs = uniqPreserve(DEALERS.map(d=>d.territory)).sort();
+  sel.innerHTML = '<option value="">All territories</option>' + terrs.map(t=>`<option value="${t}">${t}</option>`).join('');
+  sel.value = growthState.territory;
 }
 
 function currentComparePeriod(){
@@ -867,23 +974,32 @@ function currentComparePeriod(){
   return growthState.customPeriod;
 }
 
+function grLevelInfo(){
+  if(growthState.territory) return {level:'dealer'};
+  if(growthState.region) return {level:'territory'};
+  if(growthState.zone) return {level:'region'};
+  return {level:'zone'};
+}
+
 function drawGrowth(){
   const curIdx = periodIndices(growthState.period);
   const cmp = currentComparePeriod();
   const prevIdx = cmp ? periodIndices(cmp) : [];
-  const info = (function(){
-    if(growthState.path.length===0) return {level:'zone'};
-    if(growthState.path.length===1) return {level:'region'};
-    if(growthState.path.length===2) return {level:'territory'};
-    return {level:'dealer'};
-  })();
-  const scoped = dealersForPath(growthState.path);
+  const info = grLevelInfo();
+  const scoped = dealersForFilters(growthState.zone, growthState.region, growthState.territory);
 
-  const crumbs = ['<button data-i="-1">All India</button>'];
-  growthState.path.forEach((p,i)=>{ crumbs.push('<span class="sep">›</span>'); crumbs.push(`<button data-i="${i}">${p.value}</button>`); });
+  const crumbs = ['<button data-lvl="root">All India</button>'];
+  if(growthState.zone){ crumbs.push('<span class="sep">›</span>'); crumbs.push(`<button data-lvl="zone">${growthState.zone}</button>`); }
+  if(growthState.region){ crumbs.push('<span class="sep">›</span>'); crumbs.push(`<button data-lvl="region">${growthState.region}</button>`); }
   document.getElementById('gr-crumbs').innerHTML = crumbs.join(' ');
   document.getElementById('gr-crumbs').querySelectorAll('button').forEach(b=>{
-    b.addEventListener('click', ()=>{ const i=parseInt(b.dataset.i,10); growthState.path = i<0? [] : growthState.path.slice(0,i+1); drawGrowth(); });
+    b.addEventListener('click', ()=>{
+      const lvl = b.dataset.lvl;
+      if(lvl==='root'){ growthState.zone=''; growthState.region=''; growthState.territory=''; }
+      else if(lvl==='zone'){ growthState.region=''; growthState.territory=''; }
+      else if(lvl==='region'){ growthState.territory=''; }
+      syncGrControls(); drawGrowth();
+    });
   });
 
   {
@@ -898,26 +1014,31 @@ function drawGrowth(){
   if(info.level==='zone'){
     rows = ZONES.map(z=>{
       const ds = scoped.filter(d=>d.zone===z);
-      const cur = ds.reduce((s,d)=>s+sumForIdx(d,curIdx),0);
-      const prev = ds.reduce((s,d)=>s+sumForIdx(d,prevIdx),0);
-      return {key:z, name:z, cur, prev};
+      const cur = periodValue(ds.reduce((s,d)=>s+sumForIdx(d,curIdx),0), curIdx.length);
+      const prev = periodValue(ds.reduce((s,d)=>s+sumForIdx(d,prevIdx),0), prevIdx.length);
+      return {key:z, level:'zone', name:z, cur, prev};
     });
   } else if(info.level==='region'){
-    const regions = [...(zoneRegions[growthState.path[0].value]||[])];
+    const regions = [...(zoneRegions[growthState.zone]||[])];
     rows = regions.map(r=>{
       const ds = scoped.filter(d=>d.region===r);
-      const cur = ds.reduce((s,d)=>s+sumForIdx(d,curIdx),0);
-      const prev = ds.reduce((s,d)=>s+sumForIdx(d,prevIdx),0);
-      return {key:r, name:r, cur, prev};
+      const cur = periodValue(ds.reduce((s,d)=>s+sumForIdx(d,curIdx),0), curIdx.length);
+      const prev = periodValue(ds.reduce((s,d)=>s+sumForIdx(d,prevIdx),0), prevIdx.length);
+      return {key:r, level:'region', name:r, cur, prev};
     });
   } else if(info.level==='territory'){
-    const rk = growthState.path[0].value+'|'+growthState.path[1].value;
+    const rk = growthState.zone+'|'+growthState.region;
     const terrs = [...(regionTerritories[rk]||[])].map(s=>{ const [name,code]=s.split('||'); return {name,code}; });
     rows = terrs.map(t=>{
       const ds = scoped.filter(d=>d.territory===t.name);
-      const cur = ds.reduce((s,d)=>s+sumForIdx(d,curIdx),0);
-      const prev = ds.reduce((s,d)=>s+sumForIdx(d,prevIdx),0);
-      return {key:t.name, name:t.name+' ('+t.code+')', rawName:t.name, cur, prev};
+      const cur = periodValue(ds.reduce((s,d)=>s+sumForIdx(d,curIdx),0), curIdx.length);
+      const prev = periodValue(ds.reduce((s,d)=>s+sumForIdx(d,prevIdx),0), prevIdx.length);
+      return {key:t.name, level:'territory', name:t.name+' ('+t.code+')', rawName:t.name, cur, prev};
+    });
+  } else {
+    rows = scoped.map(d=>{
+      const cur = periodValue(sumForIdx(d,curIdx), curIdx.length), prev = periodValue(sumForIdx(d,prevIdx), prevIdx.length);
+      return {key:d.id, level:'dealer', name:d.name, cur, prev};
     });
   }
 
@@ -927,10 +1048,11 @@ function drawGrowth(){
 
   const totalCur = rows.reduce((s,r)=>s+r.cur,0), totalPrev = rows.reduce((s,r)=>s+r.prev,0);
 
+  const valSuffix = state.valueMode==='avg' ? ' (avg/mo)' : '';
   const cols = [
-    {key:'name', label: info.level==='zone'?'Zone':info.level==='region'?'Region':'Territory', left:true},
-    {key:'cur', label: periodLabel(growthState.period)},
-    {key:'prev', label: cmp? periodLabel(cmp) : 'Prior period'},
+    {key:'name', label: info.level==='zone'?'Zone':info.level==='region'?'Region':info.level==='territory'?'Territory':'Dealer', left:true},
+    {key:'cur', label: periodLabel(growthState.period)+valSuffix},
+    {key:'prev', label: (cmp? periodLabel(cmp) : 'Prior period')+valSuffix},
     {key:'abs', label:'Change'},
     {key:'growth', label:'Growth %'},
   ];
@@ -939,7 +1061,7 @@ function drawGrowth(){
   <tbody>${rows.map(r=>{
     const gtxt = r._gInf ? 'New' : (r._gNull ? '—' : pct(r.growth));
     const gcls = r._gInf ? 'num-pos' : (r._gNull ? 'dim' : pctClass(r.growth));
-    return `<tr class="clickable" data-key="${escAttr(r.key)}">
+    return `<tr class="${info.level!=='dealer'?'clickable':''}" data-key="${escAttr(r.key)}" data-level="${r.level}">
       <td class="left">${r.name}</td><td>${n(r.cur)}</td><td>${n(r.prev)}</td>
       <td class="${r.abs>0?'num-pos':(r.abs<0?'num-neg':'')}">${r.abs>0?'+':''}${n(r.abs)}</td>
       <td class="${gcls}">${gtxt}</td></tr>`;
@@ -954,24 +1076,20 @@ function drawGrowth(){
       drawGrowth();
     });
   });
-  if(info.level!=='territory'){
-    table.querySelectorAll('tbody tr.clickable').forEach(tr=>{
-      tr.addEventListener('click', ()=>{
-        const key = tr.dataset.key;
-        const lvl = info.level;
-        growthState.path.push({level:lvl, value:key});
-        drawGrowth();
-      });
-    });
-  } else {
-    table.querySelectorAll('tbody tr.clickable').forEach(tr=>{
-      tr.addEventListener('click', ()=>{
-        const key = tr.dataset.key;
+  table.querySelectorAll('tbody tr.clickable').forEach(tr=>{
+    tr.addEventListener('click', ()=>{
+      const level = tr.dataset.level, key = tr.dataset.key;
+      if(level==='territory'){
         const row = rows.find(r=>String(r.key)===key);
-        goToDealerDetails({zone:growthState.path[0].value, region:growthState.path[1].value, territory:row.rawName});
-      });
+        goToDealerDetails({zone:growthState.zone, region:growthState.region, territory:row.rawName});
+        return;
+      }
+      if(level==='zone'){ growthState.zone = key; growthState.region=''; growthState.territory=''; }
+      else if(level==='region'){ growthState.region = key; growthState.territory=''; }
+      syncGrControls();
+      drawGrowth();
     });
-  }
+  });
 }
 
 /* ============================================================
@@ -1096,7 +1214,7 @@ function drawDealerTable(){
     <th class="left ${dealerState.sortKey==='name'?'sorted':''}" data-key="name">Dealer<span class="arrow">${dealerState.sortKey==='name'?(dealerState.sortDir==='desc'?'▼':'▲'):'↕'}</span></th>
     <th class="left">Code</th><th class="left">Zone</th><th class="left">Region</th><th class="left">Territory</th>
     ${headMonths}
-    <th class="${dealerState.sortKey==='total'?'sorted':''}" data-key="total">${dealerState.view==='cumulative'?'Cumulative Total':'FY Total'}<span class="arrow">${dealerState.sortKey==='total'?(dealerState.sortDir==='desc'?'▼':'▲'):'↕'}</span></th>
+    <th class="${dealerState.sortKey==='total'?'sorted':''}" data-key="total">${state.valueMode==='avg' ? 'Avg/Month' : (dealerState.view==='cumulative'?'Cumulative Total':'FY Total')}<span class="arrow">${dealerState.sortKey==='total'?(dealerState.sortDir==='desc'?'▼':'▲'):'↕'}</span></th>
   </tr></thead>
   <tbody>${pageRows.map(({d,monthVals,total})=>{
     let cells;
@@ -1105,7 +1223,7 @@ function drawDealerTable(){
     } else {
       cells = monthVals.map(v=>`<td>${v?n(v):'<span class="dim">–</span>'}</td>`).join('');
     }
-    return `<tr><td class="left">${d.name}</td><td class="left">${d.id}</td><td class="left">${d.zone}</td><td class="left">${d.region}</td><td class="left">${d.territory}</td>${cells}<td style="font-weight:600;">${n(total)}</td></tr>`;
+    return `<tr><td class="left">${d.name}</td><td class="left">${d.id}</td><td class="left">${d.zone}</td><td class="left">${d.region}</td><td class="left">${d.territory}</td>${cells}<td style="font-weight:600;">${n(periodValue(total, idxs.length))}</td></tr>`;
   }).join('')}
   </tbody>`;
 
@@ -1253,7 +1371,7 @@ function drawDealerPerf(){
     if(dpState.search){ const s=dpState.search; if(!(d.name.toLowerCase().includes(s)||String(d.id).includes(s))) return false; }
     return true;
   }).map(d=>{
-    const cur = sumForIdx(d,curIdx), prev = sumForIdx(d,prevIdx);
+    const cur = periodValue(sumForIdx(d,curIdx), curIdx.length), prev = periodValue(sumForIdx(d,prevIdx), prevIdx.length);
     const cls = classify(cur,prev);
     const g = growthPct(cur,prev);
     return {d, cur, prev, cls, g: g===Infinity?999999:(g===null?-999999:g), gInf:g===Infinity, gNull:g===null};
@@ -1275,10 +1393,11 @@ function drawDealerPerf(){
   const counts = {growing:0,declining:0,stable:0,new:0,lost:0};
   list.forEach(r=>counts[r.cls]++);
 
+  const valSuffix = state.valueMode==='avg' ? ' (avg/mo)' : '';
   const cols = [
     {key:'name', label:'Dealer', left:true},
-    {key:'cur', label:periodLabel(dpState.period)},
-    {key:'prev', label: cmp? periodLabel(cmp):'Prior'},
+    {key:'cur', label:periodLabel(dpState.period)+valSuffix},
+    {key:'prev', label: (cmp? periodLabel(cmp):'Prior')+valSuffix},
     {key:'growth', label:'Growth %'},
   ];
   const table = document.getElementById('dp-table');
@@ -1340,6 +1459,17 @@ document.getElementById('viewToggle').addEventListener('click', e=>{
   btn.classList.add('active');
   state.mode = btn.dataset.mode;
   // re-render whatever is currently visible + reset render cache so all tabs refresh with new mode next time
+  Object.keys(rendered).forEach(k=>rendered[k]=false);
+  const activeTab = document.querySelector('.tab-btn.active').dataset.view;
+  renderers[activeTab]();
+  rendered[activeTab] = true;
+});
+
+document.getElementById('valueToggle').addEventListener('click', e=>{
+  const btn = e.target.closest('button'); if(!btn) return;
+  document.querySelectorAll('#valueToggle button').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  state.valueMode = btn.dataset.vmode;
   Object.keys(rendered).forEach(k=>rendered[k]=false);
   const activeTab = document.querySelector('.tab-btn.active').dataset.view;
   renderers[activeTab]();
